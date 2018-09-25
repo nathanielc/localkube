@@ -1,0 +1,13 @@
+[Unit]
+Description=A static IP on the a stable interface for Kubernetes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/default/k8s-ip
+ExecStart=/usr/bin/ip address add ${IP} dev ${INTERFACE}
+ExecStop=/usr/bin/ip address del ${IP}/32 dev ${INTERFACE}
+
+[Install]
+WantedBy=network-online.target
+

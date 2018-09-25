@@ -1,82 +1,66 @@
 #!/bin/bash
 
 # Install packages docker kubelet kubeadm
-# Ubuntu steps:
-#   apt-get update && apt-get install -y apt-transport-https
-#   curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
-#   echo "deb http://apt.kubernetes.io/ kubernetes-xenial main" > /etc/apt/sources.list.d/kubernetes.list
-#
-#   apt-get install docker.io kubelet kubeadm kubernetes-cni
 
 set -e
 
-DOMAIN=${DOMAIN-slate.internal}
-#IP=$(hostname --ip-address | awk '{print $1}')
+# Pick a domain for the cluster DNS
+DOMAIN=${DOMAIN-cluster.local}
+# Pick an IP to bind to, kubeadm/kubelet will not use a 127.0.0.1/8 IP, so it needs to be a different IP
+# By default we use 10.1.1.1 since its in the private 10.0.0.0/8 range.
+IP=${IP-10.1.1.1}
+# Bind the new IP to an interface, this interface should be stable, meaning it does not go away when WiFi is turned off/on or when ethernet cabels are unplugged/plugged.
+# By default we use the loopback interface since that is typically stable.
+INTERFACE=${INTERFACE-lo}
 
-bind_dirs='/etc/kubernetes/pki /etc/kubernetes/scheduler.conf /etc/ssl/certs /var/lib/etcd'
-for dir in $bind_dirs
-do
-    sudo umount $dir $dir || true
-done
 
+# Setup static IP for k8s on a stable interface
+sudo cp ./k8s-ip.env /etc/default/k8s-ip
+sudo sed -i "s/IP=.*/IP=$IP/" /etc/default/k8s-ip
+sudo sed -i "s/INTERFACE=.*/INTERFACE=$INTERFACE/" /etc/default/k8s-ip
+
+sudo cp ./k8s-ip.service /etc/systemd/system/k8s-ip.service
+sudo systemctl daemon-reload
+sudo systemctl enable k8s-ip.service
+sudo systemctl start k8s-ip.service
+
+# Reset any existing kubelet config
 sudo kubeadm reset
 
+# Setup systemd config for kubelet
+sudo mkdir -p /etc/default
+sudo cp ./kubelet.env /etc/default/kubelet
+
 sudo mkdir -p /etc/systemd/system/kubelet.service.d/
-sudo cp ./override.conf /etc/systemd/system/kubelet.service.d/
+sudo cp ./kubelet.override.conf /etc/systemd/system/kubelet.service.d/
 
 sudo mkdir -p /etc/kubernetes
 sudo cp ./kubelet.system.config /etc/kubernetes/
+# The --service-dns-domain flag below does not completely work so we workaround it by doing its work for it here.
+sudo sed -i "s/clusterDomain:.*/clusterDomain: $DOMAIN/" /etc/kubernetes/kubelet.system.config
+sudo sed -i "s/address:.*/address: $IP/" /etc/kubernetes/kubelet.system.config
 
 sudo systemctl daemon-reload
-
-# Bind paths as workaround to https://github.com/moby/moby/issues/37032
-#for dir in $bind_dirs
-#do
-#    sudo touch $dir
-#    sudo mount --bind $dir $dir
-#done
 
 # Run kubeadm to setup kubelet systemd service.
 # Check for any warnings and attempt to resolve.
 sudo kubeadm init \
-    --kubernetes-version 1.10.3 \
-    --apiserver-advertise-address 127.0.0.1 \
-    --apiserver-cert-extra-sans 127.0.0.1 \
+    -v 5 \
+    --kubernetes-version 1.11.2 \
+    --apiserver-advertise-address $IP \
+    --apiserver-cert-extra-sans $IP \
     --service-dns-domain $DOMAIN \
     --service-cidr 10.42.0.0/16 \
     --pod-network-cidr 192.168.100.0/24 \
-    --ignore-preflight-errors=Swap
-    #--node-name localhost \
-
-# The flag --service-dns-domain doesn't work
-# Stop kublet and update manually
-# Edit: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-sudo systemctl stop kubelet
-sudo sed -i "s/cluster\.local/$DOMAIN/" /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-sudo sed -i "s/10\.96\.0\.10/10.42.0.10/" /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-#sudo sed -i "s/KUBELET_DNS_ARGS=/KUBELET_DNS_ARGS=--hostname-override 127.0.0.1 /" /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-#if [ -z $IP ]
-#then
-#    sudo find /etc/kubernetes -type f | xargs sudo sed -i "s/$IP/127.0.0.1/"
-#fi
-sudo systemctl daemon-reload
-sudo systemctl start kubelet
-
+    --ignore-preflight-errors=Swap \
+    --feature-gates=CoreDNS=false
 
 # Setup kubectl
 mkdir -p $HOME/.kube
 sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
+#sed -i "s/$IP/127.0.0.1/" $HOME/.kube/config
 
-mkdir -p /root
-sudo cp /etc/kubernetes/admin.conf /root/.kube/config
-
-# Reapply manifests
-
-#for m in $(sudo ls /etc/kubernetes/manifests)
-#do
-#    sudo kubectl apply -f /etc/kubernetes/manifests/$m
-#done
 
 # Add Kube-router
 kubectl apply -f https://raw.githubusercontent.com/cloudnativelabs/kube-router/master/daemonset/kubeadm-kuberouter.yaml
@@ -89,5 +73,3 @@ kubectl create -f https://raw.githubusercontent.com/MaZderMind/hostpath-provisio
 kubectl create -f https://raw.githubusercontent.com/MaZderMind/hostpath-provisioner/master/manifests/deployment.yaml
 kubectl create -f https://raw.githubusercontent.com/MaZderMind/hostpath-provisioner/master/manifests/storageclass.yaml
 
-# If you want to tear down the cluser use:
-# sudo kubeadm reset
